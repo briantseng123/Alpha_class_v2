@@ -3,15 +3,14 @@ import pandas as pd
 import json
 from bs4 import BeautifulSoup
 import itertools
-import google.generativeai as genai
 from io import StringIO
 
-# --- Page Configuration and Utility Functions ---
+# --- 頁面設定與輔助函式 ---
 
 st.set_page_config(page_title="互動式排課助手", layout="wide")
 
-def show_message(message, type='info', duration=3):
-    """A consistent way to show messages, using st.toast for popups."""
+def show_message(message, type='info'):
+    """統一顯示訊息的方式，使用 st.toast 彈出提示。"""
     if type == 'success':
         st.toast(f"✅ {message}", icon="✅")
     elif type == 'warning':
@@ -24,50 +23,30 @@ def show_message(message, type='info', duration=3):
 DAY_MAP_DISPLAY = {"Mon": "一", "Tue": "二", "Wed": "三", "Thu": "四", "Fri": "五", "Sat": "六", "Sun": "日"}
 DAY_MAP_HTML_INPUT = {"一": "Mon", "二": "Tue", "三": "Wed", "四": "Thu", "五": "Fri", "六": "Sat", "日": "Sun"}
 
-# --- State Initialization ---
+# --- 狀態初始化 ---
 
 def initialize_session_state():
-    """Initializes all necessary variables in Streamlit's session state."""
+    """初始化 Streamlit Session State 中所有必要的變數。"""
     if 'courses' not in st.session_state:
         st.session_state.courses = []
     if 'editing_course_index' not in st.session_state:
-        st.session_state.editing_course_index = None # Using None instead of -1
+        st.session_state.editing_course_index = None
     if 'current_editing_time_slots' not in st.session_state:
         st.session_state.current_editing_time_slots = []
     if 'generated_schedules' not in st.session_state:
         st.session_state.generated_schedules = []
     if 'conflict_schedules' not in st.session_state:
         st.session_state.conflict_schedules = []
-    if 'gemini_api_key' not in st.session_state:
-        st.session_state.gemini_api_key = ''
 
-# --- Gemini API Helper ---
-
-@st.cache_data(show_spinner="✨ 正在呼叫 AI...")
-def call_gemini_api(prompt, api_key):
-    """Helper function to call the Gemini API."""
-    if not api_key:
-        st.error("請在側邊欄輸入您的 Gemini API 金鑰。")
-        return None
-    try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        st.error(f"調用智慧API時出錯: {e}")
-        return None
-
-# --- Core Logic (from JS translated to Python) ---
+# --- 核心邏輯 (從 JS 轉譯為 Python) ---
 
 def parse_html_to_courses(html_content):
-    """Parses HTML table content into a list of course dictionaries."""
+    """將 HTML 表格內容解析為課程字典列表。"""
     if not html_content:
         return [], 0, 0
 
     soup = BeautifulSoup(html_content, 'html.parser')
     
-    # Try to find the most likely table
     tables = soup.find_all('table')
     if not tables:
         return [], 0, 0
@@ -98,7 +77,6 @@ def parse_html_to_courses(html_content):
             teacher_cell = cells[13]
             teacher_name_text = teacher_cell.get_text(strip=True).split('(')[0]
 
-            # --- Time Slot Parsing ---
             time_slots_list = []
             classroom_notes = []
             for time_cell_idx in [14, 15]:
@@ -123,24 +101,16 @@ def parse_html_to_courses(html_content):
             notes = f"教室資訊: {', '.join(list(set(classroom_notes)))}" if classroom_notes else ""
 
             course_obj = {
-                'name': course_name_text,
-                'type': course_type,
-                'class_id': combined_class_id,
-                'credits': credits_val,
-                'priority': 3,
-                'time_slots': time_slots_list,
-                'teacher': teacher_name_text,
-                'notes': notes,
-                'must_select': False,
-                'temporarily_exclude': False,
-                '_internal_original_id': original_class_id
+                'name': course_name_text, 'type': course_type, 'class_id': combined_class_id,
+                'credits': credits_val, 'priority': 3, 'time_slots': time_slots_list,
+                'teacher': teacher_name_text, 'notes': notes, 'must_select': False,
+                'temporarily_exclude': False, '_internal_original_id': original_class_id
             }
             newly_parsed_courses.append(course_obj)
         except (IndexError, ValueError) as e:
             print(f"Skipping row {row_idx} due to parsing error: {e}")
             continue
 
-    # --- Add to main state, avoiding duplicates ---
     added_count = 0
     skipped_count = 0
     existing_ids = { (c.get('_internal_original_id') or c['class_id'], c['name']) for c in st.session_state.courses }
@@ -148,7 +118,6 @@ def parse_html_to_courses(html_content):
     for new_course in newly_parsed_courses:
         unique_key = (new_course.get('_internal_original_id') or new_course['class_id'], new_course['name'])
         if unique_key not in existing_ids:
-            # Clean up temp property before adding
             if '_internal_original_id' in new_course:
                 del new_course['_internal_original_id']
             st.session_state.courses.append(new_course)
@@ -160,7 +129,7 @@ def parse_html_to_courses(html_content):
     return newly_parsed_courses, added_count, skipped_count
 
 def generate_schedules_algorithm(all_courses, max_schedules):
-    """The core scheduling algorithm, ported from JavaScript."""
+    """核心排課演算法"""
     available_courses = [c for c in all_courses if not c.get('temporarily_exclude', False)]
     must_select_names = {c['name'] for c in available_courses if c.get('must_select', False)}
 
@@ -175,7 +144,6 @@ def generate_schedules_algorithm(all_courses, max_schedules):
     if not course_options:
         return []
 
-    # Using itertools.product for Cartesian product
     all_combinations = itertools.product(*course_options)
     
     schedules_found = []
@@ -209,9 +177,7 @@ def generate_schedules_algorithm(all_courses, max_schedules):
         total_priority = sum(c['priority'] for c in combo)
         
         schedules_found.append({
-            'combo': combo,
-            'totalPriority': total_priority,
-            'totalCredits': total_credits,
+            'combo': combo, 'totalPriority': total_priority, 'totalCredits': total_credits,
             'reqCredits': sum(c['credits'] for c in combo if c['type'] == '必修'),
             'eleCredits': sum(c['credits'] for c in combo if c['type'] == '選修'),
             'conflictsDetails': conflict_details if conflict_details else None,
@@ -221,10 +187,10 @@ def generate_schedules_algorithm(all_courses, max_schedules):
         
     return schedules_found
 
-# --- UI Rendering Functions ---
+# --- UI 渲染函式 ---
 
 def render_sidebar():
-    """Renders the sidebar for file operations and API key input."""
+    """渲染側邊欄，用於檔案操作。"""
     with st.sidebar:
         st.title("操作選單")
         st.write("---")
@@ -251,25 +217,16 @@ def render_sidebar():
                 file_name="courses.json",
                 mime="application/json",
             )
-        
-        st.write("---")
-        st.header("AI 功能設定")
-        st.session_state.gemini_api_key = st.text_input(
-            "Google Gemini API 金鑰", 
-            type="password", 
-            value=st.session_state.get('gemini_api_key', ''),
-            help="為了使用'產生建議備註'和'分析課表'功能，請在此輸入您的 API Key。"
-        )
 
 def render_add_edit_tab():
-    """Renders the UI for adding or editing a course."""
+    """渲染新增或編輯課程的 UI。"""
     editing_mode = st.session_state.editing_course_index is not None
     
     if editing_mode:
         course = st.session_state.courses[st.session_state.editing_course_index]
         title = "編輯課程"
     else:
-        course = {} # Default empty course for adding
+        course = {}
         title = "新增課程"
 
     with st.form(key="course_form"):
@@ -291,22 +248,7 @@ def render_add_edit_tab():
 
         teacher = st.text_input("授課老師", value=course.get('teacher', ''))
         
-        # AI Smart Notes
-        notes_col, btn_col = st.columns([3, 1])
-        with notes_col:
-            notes = st.text_area("備註", value=course.get('notes', ''), height=100)
-        with btn_col:
-            st.write("") # Spacer
-            st.write("") # Spacer
-            if st.button("✨ 產生建議備註"):
-                if not name:
-                    show_message("請先填寫課程名稱以產生建議備註。", 'warning')
-                else:
-                    prompt = f"針對一門大學課程「{name}」(授課老師: {teacher or '未知'})，請提供一些關於這門課可能的簡短備註。例如：作業量、教學風格、考試難度、是否推薦等。請以條列式呈現，總字數約50-100字。"
-                    suggested_notes = call_gemini_api(prompt, st.session_state.gemini_api_key)
-                    if suggested_notes:
-                        notes = (notes + "\n\n" if notes else "") + "--- AI建議備註 ---\n" + suggested_notes
-                        show_message("智慧備註已產生！", 'success')
+        notes = st.text_area("備註", value=course.get('notes', ''), height=100)
         
         col5, col6 = st.columns(2)
         with col5:
@@ -314,7 +256,6 @@ def render_add_edit_tab():
         with col6:
             temporarily_exclude = st.checkbox("暫時排除", value=course.get('temporarily_exclude', False))
             
-        # --- Time Slot Management ---
         with st.expander("上課時間*", expanded=True):
             st.write("目前已添加的時間：")
             if not st.session_state.current_editing_time_slots:
@@ -324,10 +265,9 @@ def render_add_edit_tab():
                     day, period, classroom = ts
                     ts_col1, ts_col2 = st.columns([4,1])
                     ts_col1.markdown(f"- **{DAY_MAP_DISPLAY.get(day, day)} 第 {period} 堂** (教室: {classroom or '未指定'})")
-                    # The button needs to be inside the form to trigger a rerun correctly
                     if ts_col2.form_submit_button("移除", key=f"remove_ts_{i}", use_container_width=True):
                          st.session_state.current_editing_time_slots.pop(i)
-                         st.rerun() # Rerun to reflect removal
+                         st.rerun()
 
             st.write("---")
             st.write("新增時間段：")
@@ -337,16 +277,14 @@ def render_add_edit_tab():
             with ts_add_col2:
                 new_period = st.number_input("堂課", min_value=1, max_value=10, step=1, key="new_period")
             with ts_add_col3:
-                # This button needs to be a form_submit_button to work within the form
                  if st.form_submit_button("➕ 添加時間", use_container_width=True):
-                    new_slot = [new_day, new_period, ''] # Classroom is blank for manual adds
+                    new_slot = [new_day, new_period, '']
                     if new_slot not in st.session_state.current_editing_time_slots:
                         st.session_state.current_editing_time_slots.append(new_slot)
-                        st.rerun() # Rerun to show the new slot
+                        st.rerun()
                     else:
                         show_message("該時間段已添加。", 'warning')
 
-        # --- Form Submission ---
         st.write("---")
         submit_col1, submit_col2 = st.columns(2)
         submitted = submit_col1.form_submit_button("儲存課程" if editing_mode else "新增課程", type="primary", use_container_width=True)
@@ -369,7 +307,6 @@ def render_add_edit_tab():
                     st.session_state.courses.append(new_course_data)
                     show_message(f"課程 '{name}' 已新增。", 'success')
                 
-                # Reset form state
                 st.session_state.editing_course_index = None
                 st.session_state.current_editing_time_slots = []
                 st.rerun()
@@ -380,7 +317,7 @@ def render_add_edit_tab():
             st.rerun()
 
 def render_html_import_tab():
-    """Renders the UI for importing courses from HTML."""
+    """渲染從 HTML 匯入課程的 UI。"""
     st.subheader("貼上HTML匯入課程")
     st.info("請從學校的課程查詢網頁，使用開發者工具 (F12) 選取包含所有課程資訊的 `<table>` 元素，然後複製其「外部 HTML」(Outer HTML)，並將其貼到下方的文字區域中。")
     
@@ -401,22 +338,19 @@ def render_html_import_tab():
                 show_message("未從提供的 HTML 中解析到任何課程，或所有課程都已存在。", 'warning')
 
 def render_course_list_tab():
-    """Renders the course list using st.data_editor for interactivity."""
+    """使用 st.data_editor 渲染課程列表以進行互動。"""
     st.subheader("課程列表")
     
     if not st.session_state.courses:
         st.warning("目前沒有課程。請從'新增課程'或'貼上HTML匯入'分頁加入。")
         return
 
-    # Convert list of dicts to DataFrame for st.data_editor
     df = pd.DataFrame(st.session_state.courses)
     
-    # Format time_slots for display
     df['time_slots_display'] = df['time_slots'].apply(
         lambda slots: '; '.join([f"{DAY_MAP_DISPLAY.get(s[0], s[0])}{s[1]}" + (f"({s[2]})" if s[2] else "") for s in slots])
     )
     
-    # Add a 'delete' column for selection
     df.insert(0, "delete", False)
 
     column_config = {
@@ -426,13 +360,10 @@ def render_course_list_tab():
         "class_id": "班級",
         "credits": st.column_config.NumberColumn("學分", min_value=0, format="%d"),
         "priority": st.column_config.NumberColumn("優先", min_value=1, max_value=5, format="%d"),
-        "teacher": "老師",
-        "time_slots_display": "時間/教室",
+        "teacher": "老師", "time_slots_display": "時間/教室",
         "must_select": st.column_config.CheckboxColumn("必選", default=False),
         "temporarily_exclude": st.column_config.CheckboxColumn("排除", default=False),
-        "notes": "備註",
-        # Hide the raw time_slots column
-        "time_slots": None,
+        "notes": "備註", "time_slots": None,
     }
     
     column_order = [
@@ -443,18 +374,13 @@ def render_course_list_tab():
     st.info("您可以直接在此表格中編輯大部分欄位。修改後，點擊下方的'更新課程列表'按鈕儲存變更。若要編輯上課時間，請使用下方的'編輯選取課程'功能。")
     
     edited_df = st.data_editor(
-        df[column_order],
-        column_config=column_config,
-        use_container_width=True,
-        hide_index=True,
-        num_rows="dynamic" # This allows adding/deleting rows directly in the editor
+        df[column_order], column_config=column_config, use_container_width=True,
+        hide_index=True, num_rows="dynamic"
     )
     
     if st.button("更新課程列表", type="primary"):
-        # Filter out rows marked for deletion
         courses_to_keep = edited_df[edited_df['delete'] == False]
         
-        # Convert DataFrame back to list of dicts, preserving original time_slots
         updated_courses = []
         for index, row in courses_to_keep.iterrows():
             original_course_data = {}
@@ -462,7 +388,7 @@ def render_course_list_tab():
                 original_course_data = st.session_state.courses[index]
             
             new_data = row.to_dict()
-            new_data['time_slots'] = original_course_data.get('time_slots', []) # Keep original time slots
+            new_data['time_slots'] = original_course_data.get('time_slots', [])
             del new_data['delete']
             del new_data['time_slots_display']
             updated_courses.append(new_data)
@@ -481,20 +407,17 @@ def render_course_list_tab():
     if selected_course_to_edit:
         selected_index = int(selected_course_to_edit.split(':')[0])
         st.session_state.editing_course_index = selected_index
-        # Pre-load time slots for the editing form
         st.session_state.current_editing_time_slots = st.session_state.courses[selected_index].get('time_slots', [])
         show_message("已載入課程進行編輯，請至'新增/編輯課程'分頁查看。")
-        # No automatic tab switching in Streamlit, user needs to click the tab.
         st.rerun()
         
 def render_schedule_generation_tab():
-    """Renders the UI for generating and displaying schedules."""
+    """渲染生成和顯示課表的 UI。"""
     st.subheader("生成排課方案")
     
     with st.form("generation_form"):
         sort_option = st.radio(
-            "選擇排序方式:",
-            options=['conflict_priority', 'priority_conflict'],
+            "選擇排序方式:", options=['conflict_priority', 'priority_conflict'],
             format_func=lambda x: {
                 'conflict_priority': '先衝堂數量少到多，接著優先順序總和多到少',
                 'priority_conflict': '先優先順序總和多到少，接著衝堂數量少到多'
@@ -518,26 +441,22 @@ def render_schedule_generation_tab():
             st.session_state.conflict_schedules = []
             return
 
-        # Sort the schedules
         all_schedules_data.sort(key=lambda s: (s['conflictEventsCount'], -s['totalPriority']) if sort_option == 'conflict_priority' else (-s['totalPriority'], s['conflictEventsCount']))
         
         st.session_state.generated_schedules = [s for s in all_schedules_data if s['conflictEventsCount'] == 0]
         st.session_state.conflict_schedules = [s for s in all_schedules_data if s['conflictEventsCount'] > 0]
         show_message(f"排課方案已生成。共 {len(all_schedules_data)} 個方案。", 'success')
 
-    # --- Display Results ---
     if st.session_state.generated_schedules or st.session_state.conflict_schedules:
         st.write("---")
         st.header("排課結果")
         
-        # Non-conflicting schedules
         st.subheader(f"✅ 不衝堂方案 ({len(st.session_state.generated_schedules)} 個)")
         if not st.session_state.generated_schedules:
             st.caption("無不衝堂的排課方案。")
         for i, schedule in enumerate(st.session_state.generated_schedules):
             render_single_schedule(schedule, i, is_conflict=False)
 
-        # Conflicting schedules
         st.subheader(f"⚠️ 有衝堂方案 ({len(st.session_state.conflict_schedules)} 個)")
         if not st.session_state.conflict_schedules:
             st.caption("目前無有衝堂方案。")
@@ -545,7 +464,7 @@ def render_schedule_generation_tab():
             render_single_schedule(schedule, i, is_conflict=True)
 
 def render_single_schedule(schedule, index, is_conflict):
-    """Renders a single schedule inside an expander."""
+    """在 expander 中渲染單個課表。"""
     header = f"方案 {index + 1} (總優先度: {schedule['totalPriority']}, 總學分: {schedule['totalCredits']}"
     if is_conflict:
         header += f", 衝堂數: {schedule['conflictEventsCount']})"
@@ -555,20 +474,10 @@ def render_single_schedule(schedule, index, is_conflict):
     with st.expander(header):
         st.markdown(f"**必修**: {schedule['reqCredits']} 學分, **選修**: {schedule['eleCredits']} 學分")
         
-        # --- Course List ---
         for course in schedule['combo']:
             ts_str = '; '.join([f"{DAY_MAP_DISPLAY.get(s[0], s[0])}{s[1]}" for s in course['time_slots']])
             st.markdown(f"- **{course['name']}** ({course['type']}, {course['credits']}學分) - *{course['teacher']}* `時:{ts_str}`")
 
-        # --- AI Analysis ---
-        if st.button("✨ 分析此課表並提供建議", key=f"analyze_{'c' if is_conflict else 'nc'}_{index}"):
-            course_descs = '; '.join([f"{c['name']} ({c['type']}, {c['credits']}學分, 老師: {c.get('teacher', '未知')})" for c in schedule['combo']])
-            prompt = f"這是一個大學生的課表草案，總共 {schedule['totalCredits']} 學分，包含以下課程：{course_descs}。請針對這個課表提供一些分析與建議，例如：\n1. 整體學習負擔評估 (例如：輕鬆、適中、繁重)。\n2. 潛在的挑戰 (例如：某幾門課可能同時很多報告或考試)。\n3. 時間管理上的建議。\n4. 任何其他值得注意的優點或機會。\n請以條列式、簡潔的方式呈現，總字數約100-150字。"
-            analysis_result = call_gemini_api(prompt, st.session_state.gemini_api_key)
-            if analysis_result:
-                st.info(f"**AI 課表分析建議:**\n\n{analysis_result}")
-
-        # --- Conflict Details ---
         if is_conflict and schedule['conflictsDetails']:
             st.write("---")
             st.error("**衝堂詳情:**")
@@ -576,16 +485,14 @@ def render_single_schedule(schedule, index, is_conflict):
                 overlap_str = ', '.join([c['name'] for c in conflict['courses']])
                 st.markdown(f"- **{DAY_MAP_DISPLAY[conflict['day']]} 第 {conflict['period']} 堂:** {overlap_str}")
 
-        # --- Schedule Grid ---
         st.write("---")
         render_schedule_grid(schedule)
 
 def render_schedule_grid(schedule):
-    """Renders the visual grid for a schedule."""
+    """渲染課表的視覺化網格。"""
     days = ["Mon", "Tue", "Wed", "Thu", "Fri"]
     periods = range(1, 11)
     
-    # Create an empty DataFrame for the grid
     grid_df = pd.DataFrame(index=periods, columns=[DAY_MAP_DISPLAY[d] for d in days])
     grid_df = grid_df.fillna('')
 
@@ -593,16 +500,14 @@ def render_schedule_grid(schedule):
         for day, period, classroom in course.get('time_slots', []):
             if day in days:
                 cell_content = f"**{course['name']}**<br><small>{course.get('teacher', '')}<br>{classroom}</small>"
-                # Check for conflict
                 if grid_df.loc[period, DAY_MAP_DISPLAY[day]]:
                      grid_df.loc[period, DAY_MAP_DISPLAY[day]] += f"<hr><span style='color:red;'>{cell_content}</span>"
                 else:
                      grid_df.loc[period, DAY_MAP_DISPLAY[day]] = cell_content
 
-    # Use st.markdown to render the table with HTML
     st.markdown(grid_df.to_html(escape=False), unsafe_allow_html=True)
 
-# --- Main Application ---
+# --- 主應用程式 ---
 
 def main():
     st.title("互動式排課助手")
@@ -610,10 +515,7 @@ def main():
     render_sidebar()
 
     tab1, tab2, tab3, tab4 = st.tabs([
-        "課程列表", 
-        "新增/編輯課程", 
-        "貼上HTML匯入", 
-        "生成排課方案"
+        "課程列表", "新增/編輯課程", "貼上HTML匯入", "生成排課方案"
     ])
 
     with tab1:
