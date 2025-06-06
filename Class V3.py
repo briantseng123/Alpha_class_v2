@@ -68,18 +68,24 @@ def render_sidebar():
 
         # Save to JSON
         if st.session_state.courses:
+            # Use a callback to reset editing state after download to prevent issues
+            def on_download():
+                 st.session_state.editing_course_index = -1
+                 st.session_state.add_form_time_slots = []
+
             json_string = json.dumps(st.session_state.courses, indent=4, ensure_ascii=False)
             st.download_button(
                 label="儲存課程資料 (JSON)",
                 data=json_string,
                 file_name="courses.json",
                 mime="application/json",
-                use_container_width=True
+                use_container_width=True,
+                on_click=on_download
             )
         else:
             st.warning("目前沒有課程可以儲存。")
             
-# --- Tab: Add/Edit Course ---
+# --- Tab: Add/Edit Course (CORRECTED) ---
 def render_add_edit_tab():
     is_editing = st.session_state.editing_course_index > -1
     header_text = "編輯課程" if is_editing else "新增課程"
@@ -89,8 +95,38 @@ def render_add_edit_tab():
     if is_editing:
         course_to_edit = st.session_state.courses[st.session_state.editing_course_index]
 
-    with st.form("course_form", clear_on_submit=True):
-        st.subheader(header_text)
+    st.subheader("1. 管理上課時間")
+    # --- This section is now OUTSIDE the form ---
+    with st.container(border=True):
+        slot_col1, slot_col2, slot_col3 = st.columns([2, 1, 1])
+        with slot_col1:
+            selected_day = st.selectbox("星期", DAY_OPTIONS, format_func=lambda d: DAY_MAP_DISPLAY[d], key="time_slot_day")
+        with slot_col2:
+            selected_period = st.number_input("堂課", min_value=1, max_value=10, key="time_slot_period")
+
+        def add_time_slot():
+            new_slot = [selected_day, selected_period]
+            if new_slot not in st.session_state.add_form_time_slots:
+                st.session_state.add_form_time_slots.append(new_slot)
+            else:
+                st.toast("該時間段已添加。", icon="⚠️")
+        
+        with slot_col3:
+            st.button("添加時間", on_click=add_time_slot, use_container_width=True)
+
+        if st.session_state.add_form_time_slots:
+            st.markdown("---")
+            for i, (day, period) in enumerate(st.session_state.add_form_time_slots):
+                ts_col1, ts_col2 = st.columns([4, 1])
+                ts_col1.write(f"• {DAY_MAP_DISPLAY[day]} 第 {period} 堂")
+                def remove_time_slot(index):
+                    st.session_state.add_form_time_slots.pop(index)
+                ts_col2.button("移除", key=f"remove_ts_{i}", on_click=remove_time_slot, args=(i,), use_container_width=True)
+    # --- End of section outside the form ---
+
+    st.subheader("2. 輸入課程詳情並儲存")
+    with st.form("course_form"):
+        st.info(f"**{header_text}**")
         
         c_name = st.text_input("課程名稱*", value=course_to_edit.get('name', ''))
         
@@ -110,40 +146,15 @@ def render_add_edit_tab():
             c_must_select = st.checkbox("必選", value=course_to_edit.get('must_select', False))
         with col_check2:
             c_temporarily_exclude = st.checkbox("暫時排除", value=course_to_edit.get('temporarily_exclude', False))
-
+        
+        # Display the managed time slots in a non-interactive way inside the form
         st.markdown("---")
-        st.subheader("上課時間*")
-
-        # Time Slot Management
-        with st.container(border=True):
-            slot_col1, slot_col2, slot_col3 = st.columns([2, 1, 1])
-            with slot_col1:
-                day_key = "time_slot_day"
-                selected_day = st.selectbox("星期", DAY_OPTIONS, format_func=lambda d: DAY_MAP_DISPLAY[d], key=day_key)
-            with slot_col2:
-                period_key = "time_slot_period"
-                selected_period = st.number_input("堂課", min_value=1, max_value=10, key=period_key)
-
-            def add_time_slot():
-                new_slot = [selected_day, selected_period]
-                if new_slot not in st.session_state.add_form_time_slots:
-                    st.session_state.add_form_time_slots.append(new_slot)
-                else:
-                    st.toast("該時間段已添加。", icon="⚠️")
-            
-            with slot_col3:
-                 st.button("添加時間", on_click=add_time_slot, use_container_width=True)
-
-            if not st.session_state.add_form_time_slots:
-                st.caption("尚未添加時間")
-            else:
-                for i, (day, period) in enumerate(st.session_state.add_form_time_slots):
-                    ts_col1, ts_col2 = st.columns([4, 1])
-                    ts_col1.write(f"• {DAY_MAP_DISPLAY[day]} 第 {period} 堂")
-                    def remove_time_slot(index):
-                        st.session_state.add_form_time_slots.pop(index)
-                    ts_col2.button("移除", key=f"remove_ts_{i}", on_click=remove_time_slot, args=(i,), use_container_width=True)
-
+        st.markdown("**將儲存的上課時間:**")
+        if not st.session_state.add_form_time_slots:
+            st.caption("尚未添加時間")
+        else:
+            time_str = '; '.join([f"{DAY_MAP_DISPLAY[day]} {period}" for day, period in st.session_state.add_form_time_slots])
+            st.success(time_str)
         st.markdown("---")
         
         submitted = st.form_submit_button(submit_text, use_container_width=True, type="primary")
@@ -163,7 +174,6 @@ def render_add_edit_tab():
                     st.session_state.courses[st.session_state.editing_course_index] = new_course
                     st.toast(f"課程 '{new_course['name']}' 已更新。", icon="🔄")
                 else:
-                    # Check for duplicates before adding
                     duplicate = next((c for c in st.session_state.courses if c['name'] == new_course['name'] and c['class_id'] == new_course['class_id']), None)
                     if duplicate:
                         st.error(f"課程 '{new_course['name']}' (班級 {new_course['class_id']}) 已存在。")
@@ -175,6 +185,7 @@ def render_add_edit_tab():
                 st.session_state.add_form_time_slots = []
                 st.session_state.editing_course_index = -1
                 st.rerun()
+
 
 # --- Tab: Import HTML ---
 def render_import_html_tab():
@@ -279,8 +290,8 @@ def render_course_list_tab():
     st.info("""
     - **必選**: 在排課時，此課程會被強制排入（除非被暫時排除）。
     - **暫時排除**: 暫時不將該課程納入排課考慮。
-    - **編輯**: 點擊 `編輯` 按鈕修改課程所有欄位。
-    - **直接編輯**: 您可以直接在下表中修改部分欄位 (如名稱、學分)，修改後會自動保存。
+    - **編輯**: 點擊 `編輯選取列` 按鈕修改課程所有欄位。
+    - **直接編輯**: 您可以直接在下表中修改大部分欄位，修改後會自動保存。
     """)
 
     if not st.session_state.courses:
@@ -289,7 +300,7 @@ def render_course_list_tab():
 
     # Convert to DataFrame for st.data_editor
     df = pd.DataFrame(st.session_state.courses)
-    df.insert(0, "select", False) # For selection
+    df.insert(0, "select", False)
     
     # Reorder and rename columns for display
     display_cols = {
@@ -301,51 +312,45 @@ def render_course_list_tab():
     
     df_display = df[display_cols.keys()].rename(columns=display_cols)
     
-    # Use data_editor for interactivity
     edited_df = st.data_editor(
         df_display,
         key="course_list_editor",
         use_container_width=True,
         hide_index=True,
         column_config={
-             "選取": st.column_config.CheckboxColumn(required=True)
+             "選取": st.column_config.CheckboxColumn(required=True),
+             "時間槽": st.column_config.TextColumn(disabled=True), # Make time slots non-editable here
         },
-        num_rows="dynamic" # Allow deletion
+        num_rows="dynamic"
     )
 
-    # Detect changes and update session state
-    if edited_df is not None:
-        # Check for row deletions
-        if len(edited_df) < len(st.session_state.courses):
-            # This is complex to map back perfectly without unique IDs. A simpler approach is to rebuild.
-            st.warning("偵測到行刪除。請使用下方的 '刪除選取列' 按鈕。表格已還原。")
-        else:
-            # Update courses based on edits
-            updated_courses = []
-            for i, row in edited_df.iterrows():
-                # Revert time_slots from string to list of lists
-                original_course = st.session_state.courses[i]
-                updated_course_data = {
-                    'name': row['名稱'], 'type': row['類型'], 'class_id': row['班級'],
-                    'credits': int(row['學分']), 'priority': int(row['優先']), 'teacher': row['老師'],
-                    'must_select': row['必選'], 'temporarily_exclude': row['排除'],
-                    'notes': row['備註'], 'time_slots': original_course['time_slots'] # Keep original slots as they are not editable here
-                }
-                updated_courses.append(updated_course_data)
-            
-            if updated_courses != st.session_state.courses:
-                 st.session_state.courses = updated_courses
-                 st.toast("課程列表已更新。", icon="💾")
-                 # No rerun needed, data_editor handles its state
-    
-    col1, col2, _ = st.columns([1,1,3])
+    if edited_df is not None and not edited_df.equals(df_display):
+        updated_courses = []
+        for i, row in edited_df.iterrows():
+            if i >= len(st.session_state.courses): continue # Ignore newly added (but empty) rows in editor
+            original_course = st.session_state.courses[i]
+            updated_course_data = {
+                'name': row['名稱'], 'type': row['類型'], 'class_id': row['班級'],
+                'credits': int(row['學分']), 'priority': int(row['優先']), 'teacher': row['老師'],
+                'must_select': row['必選'], 'temporarily_exclude': row['排除'],
+                'notes': row['備註'], 'time_slots': original_course['time_slots']
+            }
+            updated_courses.append(create_course_object(updated_course_data))
+        
+        # This logic handles both row edits and deletions from the data_editor UI
+        if updated_courses != st.session_state.courses:
+            st.session_state.courses = updated_courses
+            st.toast("課程列表已更新。", icon="💾")
+            st.rerun() # Rerun to reflect changes cleanly
+
+    st.markdown("---")
+    col1, col2, _ = st.columns([1, 1, 3])
     with col1:
         if st.button("刪除選取列", use_container_width=True):
             selected_indices = edited_df[edited_df['選取']].index.tolist()
             if not selected_indices:
                 st.warning("請先選取要刪除的課程。")
             else:
-                # Delete from backend list in reverse order
                 for i in sorted(selected_indices, reverse=True):
                     st.session_state.courses.pop(i)
                 st.toast(f"已刪除 {len(selected_indices)} 門課程。", icon="🗑️")
@@ -360,7 +365,6 @@ def render_course_list_tab():
                 index_to_edit = selected_indices[0]
                 st.session_state.editing_course_index = index_to_edit
                 st.session_state.add_form_time_slots = copy.deepcopy(st.session_state.courses[index_to_edit]['time_slots'])
-                # Switch to the 'Add/Edit' tab by changing the query param, a common Streamlit pattern
                 st.query_params["tab"] = "add"
                 st.rerun()
 
@@ -394,7 +398,6 @@ def render_generate_tab():
             st.session_state.generated_schedules = all_schedules_data
             st.success(f"排課方案已生成。共 {len(all_schedules_data)} 個方案。")
 
-    # Display results if they exist
     if st.session_state.generated_schedules:
         no_conflict_schedules = [s for s in st.session_state.generated_schedules if s['conflictEventsCount'] == 0]
         conflict_schedules = [s for s in st.session_state.generated_schedules if s['conflictEventsCount'] > 0]
@@ -403,45 +406,43 @@ def render_generate_tab():
         if not no_conflict_schedules:
             st.info("無不衝堂的排課方案。")
         else:
-            display_schedules(no_conflict_schedules)
+            display_schedules(no_conflict_schedules, "noconflict")
 
         st.header("⚠️ 有衝堂方案")
         if not conflict_schedules:
             st.info("目前無有衝堂方案。")
         else:
-            display_schedules(conflict_schedules)
+            display_schedules(conflict_schedules, "conflict")
 
 def generate_schedules_algorithm(all_courses, max_schedules):
     available_courses = [c for c in all_courses if not c['temporarily_exclude']]
     must_select_names = {c['name'] for c in available_courses if c['must_select']}
 
-    # Group courses by name
     grouped_courses = defaultdict(list)
     for c in available_courses:
         grouped_courses[c['name']].append(c)
 
-    # Ensure must-select courses have options
     for name in must_select_names:
         if not grouped_courses[name]:
             st.error(f"必選課程 '{name}' 沒有可選的時間段或已被暫時排除。")
             return []
 
-    # Cartesian product of course options
-    course_options = [grouped_courses[name] for name in grouped_courses]
-    all_combinations = product(*course_options)
+    course_options = [grouped_courses[name] for name in grouped_courses if grouped_courses[name]]
+    if not course_options:
+        return []
 
+    all_combinations = product(*course_options)
     schedules_found = []
+    
     for i, combo in enumerate(all_combinations):
         if len(schedules_found) >= max_schedules:
             st.warning(f"已達到最大排課方案數量 ({max_schedules})，停止生成。")
             break
         
-        # Check if combo satisfies all must-select courses
         combo_names = {c['name'] for c in combo}
         if not must_select_names.issubset(combo_names):
             continue
 
-        # Check for conflicts
         time_slot_map = defaultdict(list)
         for c in combo:
             for day, period in c['time_slots']:
@@ -453,11 +454,10 @@ def generate_schedules_algorithm(all_courses, max_schedules):
                 day, period = key.split('-')
                 conflicts_details.append({'day': day, 'period': int(period), 'courses': courses_in_slot})
         
-        total_credits = sum(c['credits'] for c in combo)
         schedules_found.append({
             'combo': combo,
             'totalPriority': sum(c['priority'] for c in combo),
-            'totalCredits': total_credits,
+            'totalCredits': sum(c['credits'] for c in combo),
             'reqCredits': sum(c['credits'] for c in combo if c['type'] == '必修'),
             'eleCredits': sum(c['credits'] for c in combo if c['type'] == '選修'),
             'conflictsDetails': conflicts_details,
@@ -465,7 +465,7 @@ def generate_schedules_algorithm(all_courses, max_schedules):
         })
     return schedules_found
 
-def display_schedules(schedules):
+def display_schedules(schedules, key_prefix):
     for i, schedule in enumerate(schedules):
         summary_parts = [
             f"方案 {i + 1}",
@@ -481,7 +481,6 @@ def display_schedules(schedules):
             for course in schedule['combo']:
                 st.markdown(f"- **{course['name']}** ({course['type']}) | 班:{course['class_id']}, 學分:{course['credits']}, 優:{course['priority']}, 師:{course.get('teacher', 'N/A')}")
             
-            # Display schedule grid
             st.dataframe(create_schedule_grid_df(schedule), use_container_width=True)
 
             if schedule['conflictsDetails']:
@@ -500,14 +499,12 @@ def create_schedule_grid_df(schedule):
         for day, period in course['time_slots']:
             if day in days_to_display:
                 display_day = DAY_MAP_DISPLAY[day]
-                # Combine name and teacher, handle potential conflicts in the same cell
                 cell_content = f"{course['name']}\n({course.get('teacher', 'N/A')})"
                 if df.at[period, display_day] == '':
                     df.at[period, display_day] = cell_content
-                else: # Conflict
+                else:
                     df.at[period, display_day] += f"\n---\n{cell_content}"
     
-    # Custom styling for conflicts
     def style_conflicts(val):
         return 'background-color: #fee2e2; color: #ef4444; font-weight: bold;' if '---\n' in val else ''
     
@@ -519,19 +516,40 @@ def main():
     initialize_session_state()
     render_sidebar()
 
-    # Tab navigation using query parameters
-    query_params = st.query_params
-    default_tab_index = ["add", "html", "list", "gen"].index(query_params.get("tab", "add"))
-
+    # Tab navigation using query parameters for better state handling
+    if 'tab' not in st.query_params:
+        st.query_params['tab'] = 'add'
+    
+    # When switching tabs, clear editing state
+    def on_tab_change():
+        st.session_state.editing_course_index = -1
+        st.session_state.add_form_time_slots = []
+        
     tab1, tab2, tab3, tab4 = st.tabs(["✍️ 新增/編輯課程", "📋 貼上HTML匯入", "📚 課程列表", "📊 生成排課方案"])
 
     with tab1:
+        # This check is to see if we were sent here from the "Edit" button
+        if st.query_params.get("tab") != "add":
+            on_tab_change()
+            st.query_params["tab"] = "add"
         render_add_edit_tab()
+
     with tab2:
+        if st.query_params.get("tab") != "html":
+            on_tab_change()
+            st.query_params["tab"] = "html"
         render_import_html_tab()
+
     with tab3:
+        if st.query_params.get("tab") != "list":
+            on_tab_change()
+            st.query_params["tab"] = "list"
         render_course_list_tab()
+
     with tab4:
+        if st.query_params.get("tab") != "gen":
+            on_tab_change()
+            st.query_params["tab"] = "gen"
         render_generate_tab()
 
 if __name__ == "__main__":
