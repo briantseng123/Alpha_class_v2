@@ -41,19 +41,24 @@ def initialize_session_state():
 # --- 核心邏輯 (從 JS 轉譯為 Python) ---
 
 def parse_html_to_courses(html_content):
-    """將 HTML 表格內容解析為課程字典列表。"""
+    """
+    將 HTML 表格內容解析為課程字典列表。
+    *** NEW LOGIC ***: 使用 (課程名稱, 老師) 作為 key，將多行但屬於同一門課的時間合併。
+    """
     if not html_content:
-        return [], 0, 0
+        return 0, 0
 
     soup = BeautifulSoup(html_content, 'html.parser')
     
     tables = soup.find_all('table')
     if not tables:
-        return [], 0, 0
+        return 0, 0
+    # 假設課程最多的表格是主表格
     course_table = sorted(tables, key=lambda t: len(t.find_all('tr')), reverse=True)[0]
     
     rows = course_table.find_all('tr')
-    newly_parsed_courses = []
+    # 使用字典來合併屬於同一老師的同一門課程
+    parsed_courses_dict = {}
 
     for row_idx, row in enumerate(rows):
         cells = row.find_all('td')
@@ -61,12 +66,10 @@ def parse_html_to_courses(html_content):
             continue
 
         try:
+            # --- 解析儲存格資料 ---
             grade_text = cells[1].get_text(strip=True)
-            original_class_id = cells[3].get_text(strip=True)
             class_group_text = cells[6].get_text(strip=True)
-            
-            combined_class_id = f"{grade_text} {class_group_text}".strip()
-            if not combined_class_id: combined_class_id = original_class_id
+            combined_class_id = f"{grade_text} {class_group_text}".strip() or cells[3].get_text(strip=True)
 
             course_type = "必修" if "必" in cells[8].get_text(strip=True) else "選修"
             credits_val = int(cells[9].get_text(strip=True) or 0)
@@ -76,7 +79,8 @@ def parse_html_to_courses(html_content):
 
             teacher_cell = cells[13]
             teacher_name_text = teacher_cell.get_text(strip=True).split('(')[0]
-
+            
+            # --- 解析時間與教室 ---
             time_slots_list = []
             classroom_notes = []
             for time_cell_idx in [14, 15]:
@@ -100,50 +104,69 @@ def parse_html_to_courses(html_content):
             
             notes = f"教室資訊: {', '.join(list(set(classroom_notes)))}" if classroom_notes else ""
 
-            course_obj = {
-                'name': course_name_text, 'type': course_type, 'class_id': combined_class_id,
-                'credits': credits_val, 'priority': 3, 'time_slots': time_slots_list,
-                'teacher': teacher_name_text, 'notes': notes, 'must_select': False,
-                'temporarily_exclude': False, '_internal_original_id': original_class_id
-            }
-            newly_parsed_courses.append(course_obj)
+            # --- 合併邏輯 ---
+            course_key = (course_name_text, teacher_name_text)
+            if course_key in parsed_courses_dict:
+                # 如果課程已存在，合併時間和備註
+                parsed_courses_dict[course_key]['time_slots'].extend(time_slots_list)
+                # 避免重複時間
+                unique_slots = [list(t) for t in set(tuple(s) for s in parsed_courses_dict[course_key]['time_slots'])]
+                parsed_courses_dict[course_key]['time_slots'] = unique_slots
+                if notes and notes not in parsed_courses_dict[course_key]['notes']:
+                    parsed_courses_dict[course_key]['notes'] += " / " + notes
+            else:
+                # 如果是新課程，建立新項目
+                course_obj = {
+                    'name': course_name_text, 'type': course_type, 'class_id': combined_class_id,
+                    'credits': credits_val, 'priority': 3, 'time_slots': time_slots_list,
+                    'teacher': teacher_name_text, 'notes': notes, 'must_select': False,
+                    'temporarily_exclude': False
+                }
+                parsed_courses_dict[course_key] = course_obj
+
         except (IndexError, ValueError) as e:
             print(f"Skipping row {row_idx} due to parsing error: {e}")
             continue
-
+    
+    # --- 將解析完的課程與現有課程列表合併 ---
+    newly_parsed_courses = list(parsed_courses_dict.values())
     added_count = 0
     skipped_count = 0
-    existing_ids = { (c.get('_internal_original_id') or c['class_id'], c['name']) for c in st.session_state.courses }
+    existing_course_keys = {(c['name'], c['teacher']) for c in st.session_state.courses}
 
     for new_course in newly_parsed_courses:
-        unique_key = (new_course.get('_internal_original_id') or new_course['class_id'], new_course['name'])
-        if unique_key not in existing_ids:
-            if '_internal_original_id' in new_course:
-                del new_course['_internal_original_id']
+        key = (new_course['name'], new_course['teacher'])
+        if key not in existing_course_keys:
             st.session_state.courses.append(new_course)
-            existing_ids.add(unique_key)
             added_count += 1
         else:
             skipped_count += 1
 
-    return newly_parsed_courses, added_count, skipped_count
+    return added_count, skipped_count
+
 
 def generate_schedules_algorithm(all_courses, max_schedules):
     """核心排課演算法"""
+    # 篩選出未被排除的課程
     available_courses = [c for c in all_courses if not c.get('temporarily_exclude', False)]
+    # 找出必選課程的名稱
     must_select_names = {c['name'] for c in available_courses if c.get('must_select', False)}
 
+    # *** GROUPING LOGIC ***: 以課程名稱將不同老師/時段的課程分組
     grouped_courses = {}
     for c in available_courses:
         if c['name'] not in grouped_courses:
             grouped_courses[c['name']] = []
         grouped_courses[c['name']].append(c)
 
+    # course_options 會是 [[微積分A], [微積分B]], [[線代A]], ...
     course_options = [grouped_courses[name] for name in grouped_courses if grouped_courses[name]]
 
     if not course_options:
         return []
 
+    # 使用 itertools.product 產生所有可能的課程組合
+    # 演算法會從每個群組中挑選一個，確保同名課只會出現一次
     all_combinations = itertools.product(*course_options)
     
     schedules_found = []
@@ -154,13 +177,14 @@ def generate_schedules_algorithm(all_courses, max_schedules):
             show_message(f"已達到最大排課方案數量 ({max_schedules})。", 'warning')
             break
         
+        # 檢查是否包含所有必選課程
         current_combo_course_names = {c['name'] for c in combo}
         if not must_select_names.issubset(current_combo_course_names):
             continue
 
+        # 檢查時間衝突
         time_slot_map = {}
         conflict_details = []
-        
         for course in combo:
             for day, period, _ in course.get('time_slots', []):
                 key = f"{day}-{period}"
@@ -187,7 +211,7 @@ def generate_schedules_algorithm(all_courses, max_schedules):
         
     return schedules_found
 
-# --- UI 渲染函式 ---
+# --- UI 渲染函式 (與前一版相同) ---
 
 def render_sidebar():
     """渲染側邊欄，用於檔案操作。"""
@@ -328,14 +352,15 @@ def render_html_import_tab():
             show_message("請先貼上 HTML 原始碼。", 'warning')
         else:
             with st.spinner("正在解析 HTML..."):
-                _, added_count, skipped_count = parse_html_to_courses(html_paste_area)
+                # *** UPDATED CALL ***
+                added_count, skipped_count = parse_html_to_courses(html_paste_area)
             if added_count > 0:
                 msg = f"成功從 HTML 新增 {added_count} 門課程。"
                 if skipped_count > 0:
-                    msg += f" 跳過了 {skipped_count} 門重複的課程。"
+                    msg += f" 跳過了 {skipped_count} 門重複或已存在的課程。"
                 show_message(msg, 'success')
             else:
-                show_message("未從提供的 HTML 中解析到任何課程，或所有課程都已存在。", 'warning')
+                show_message("未從提供的 HTML 中解析到任何新課程，或所有課程都已存在。", 'warning')
 
 def render_course_list_tab():
     """使用 st.data_editor 渲染課程列表以進行互動。"""
@@ -348,7 +373,7 @@ def render_course_list_tab():
     df = pd.DataFrame(st.session_state.courses)
     
     df['time_slots_display'] = df['time_slots'].apply(
-        lambda slots: '; '.join([f"{DAY_MAP_DISPLAY.get(s[0], s[0])}{s[1]}" + (f"({s[2]})" if s[2] else "") for s in slots])
+        lambda slots: '; '.join([f"{DAY_MAP_DISPLAY.get(s[0], s[0])}{s[1]}" + (f"({s[2]})" if s[2] else "") for s in slots]) if slots else ""
     )
     
     df.insert(0, "delete", False)
@@ -401,7 +426,7 @@ def render_course_list_tab():
     st.subheader("編輯課程時間")
     st.caption("由於時間欄位較複雜，請在此選擇一門課進行編輯，系統將會跳轉至編輯頁面。")
     
-    course_names_for_edit = [f"{i}: {c['name']} ({c['class_id']})" for i, c in enumerate(st.session_state.courses)]
+    course_names_for_edit = [f"{i}: {c['name']} ({c['teacher']})" for i, c in enumerate(st.session_state.courses)]
     selected_course_to_edit = st.selectbox("選擇要編輯的課程", options=course_names_for_edit, index=None, placeholder="點此選擇...")
 
     if selected_course_to_edit:
